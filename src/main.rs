@@ -2,26 +2,44 @@ use sink_dns::{BlockEntry, process_dns_packet};
 use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use tokio::net::{UdpSocket};
 use tokio::signal;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use clap::Parser;
+
+/// small dns sinkhole
+#[derive(Parser,Debug)]
+struct Args {
+    /// Upstream dns server to forward unsunk DNS requests
+    #[arg(short, long, default_value_t = "8.8.8.8:53".to_string())]
+    upstream_dns: String,
+
+    #[arg(short, long, value_name = "FILE", default_value_os_t=PathBuf::from(r"blocklist.txt"))]
+    blocklist: PathBuf
+}
+
 
 #[tokio::main]
 async fn main() {
+    // cli
+    let args = Args::parse();
+
+    let blocklist_path = args.blocklist;
+    let upstream_dns = args.upstream_dns;
+
     // 1. synchronous bootstrap
-    println!("[*] synchronously loading blocklist.txt");
+    println!("[*] synchronously loading blocklist from {}", blocklist_path.display());
     let mut block_list: HashMap<String, BlockEntry> = HashMap::new();
-    fs::read_to_string("blocklist.txt")
-        .expect("[x] could not read blocklist.txt")
+    fs::read_to_string(blocklist_path)
+        .expect("[x] could not read blocklist file")
         .lines()
         .for_each(|domain| {
             block_list.insert(domain.to_string(), BlockEntry::Block);
         });
 
-    // should check upstream dns from system settings
-    // TODO: dynamically determine DNS
     let tracker = TaskTracker::new();
 
     let server = UdpSocket::bind("127.0.0.1:7753")
@@ -35,19 +53,7 @@ async fn main() {
     // spawn server task
     let close_token = CancellationToken::new();
 
-    /*
-        Will need to re-organize a little.
-
-        probably need to split I/O
-
-        need a channel for responses back to the host stub resolver
-
-        mpsc chanel time
-
-    */
-
     // for real DNS traffic we forward it
-
     let (dns_traffic_tx, mut dns_traffic_rx): (Sender<sink_dns::MSG>, Receiver<sink_dns::MSG>) =
         mpsc::channel(64);
     let (dns_response_tx, mut dns_response_rx): (Sender<sink_dns::MSG>, Receiver<sink_dns::MSG>) =
@@ -58,16 +64,18 @@ async fn main() {
 
     let dns_forwarder_task = tokio::spawn(async move {
         // TODO: make the upstream dns configurable
-        let upstream_dns_addr = "8.8.8.8:53";
+        let upstream_dns_addr = upstream_dns;
 
         let mut buf = vec![0; 1024];
         loop {
+            
             tokio::select! {
                 msg = dns_traffic_rx.recv() => {
                     match msg {
                         Some((pkt, from_addr)) => {
                             println!("[*] sending payload to upstream dns");
                             let send_response = df_dns_response_tx.clone();
+                            let upstream_dns_addr = upstream_dns_addr.clone();
                             tracker.spawn(async move {
                                 // create socket
                                 let mut buf = vec![0;600]; // a few more bytes than needed

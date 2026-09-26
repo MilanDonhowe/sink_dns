@@ -22,7 +22,11 @@ pub type MSG = (Vec<u8>, SocketAddr);
 
 
 
-/* yay */
+
+
+
+
+
 
 pub async fn process_dns_packet(packet: &[u8], send_addr: SocketAddr, block_list: &HashMap<String, BlockEntry>, forward_dns: &Sender<MSG>, direct_reply: &Sender<MSG>) -> Result<(), dns::DnsDecodingError>{
     // This needs to be very fast
