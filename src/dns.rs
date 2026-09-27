@@ -2,6 +2,8 @@
 // This decodes DNS messages into their Header/Question/Resource Record format.
 // However, this does not delicately handle each resource record sub-type.
 
+use std::collections::HashSet;
+
 #[derive(Debug)]
 pub struct Header {
     id: u16,
@@ -200,71 +202,84 @@ impl DnsMessage {
     }
 }
 
-
-fn parse_labels(buffer: &[u8]) -> Result<(String, usize), DnsDecodingError> {
-    let mut cursor: usize = 0;
+// should return (label, offset)
+fn parse_labels(full_dns_msg: &[u8], offset: &usize) -> Result<(String, usize), DnsDecodingError>{
+    let mut stack: Vec<usize> = Vec::new();
     let mut parts: Vec<String> = Vec::new();
-    let mut length = (*buffer.get(cursor).ok_or(DnsDecodingError::InvalidLength)?) as usize;
-    cursor += 1;
 
-    while length != 0 {
-        let label = str::from_utf8(buffer.get(cursor..cursor+length).ok_or(DnsDecodingError::InvalidLength)?).map_err(|_|DnsDecodingError::InvalidLabelEncoding)?;
-        parts.push(label.to_string());
-        cursor += length;
-        length = *(buffer.get(cursor).ok_or(DnsDecodingError::InvalidLength)?) as usize;
-        cursor += 1;
+    let mut tracked_pointers: HashSet<u8> = HashSet::new();
 
-        if length & 0b1100_0000 != 0 {
-            return Err(DnsDecodingError::CompressedLabelLoop);
+    let offset = *offset;
+    stack.push(offset);
+
+    // we want to also return the offset of the packet after we have the processed the sequential bytes
+    // we need to take some care here as the label sequence may contain pointers that result in non-sequential 
+    // packet processing.
+    let mut total_offset: usize = offset;
+    let mut loop_back = false;
+    
+    while stack.len() > 0 {
+        let cursor = stack.pop();
+        let Some(cursor) = cursor else {
+            return Err(DnsDecodingError::InvalidLabelEncoding);
+        };
+
+        // 1. check if this is a pointer
+        let label_start_byte = *full_dns_msg.get(cursor).ok_or(DnsDecodingError::InvalidLength)?;
+        if label_start_byte & 0b1100_0000 != 0 {
+            // new offset is referenced pointer
+            let offset = label_start_byte & 0b0011_1111;
+            stack.push(offset as usize);
+            // we stop tracking how many bytes we've read from our initial offset the moment we encounter a pointer
+            if loop_back == false {
+                total_offset += 1;
+            }
+            loop_back=true;
+            /*
+                Ok, so we need to account for potentially malicious dns packets using pointers that reference each other (i.e., infinite loop).
+            */
+            if tracked_pointers.contains(&label_start_byte) {
+                return Err(DnsDecodingError::CompressedLabelLoop);
+            }
+            tracked_pointers.insert(label_start_byte);
+            continue;
         }
+        // 2. check if zero-length (loop exit condition)
+        if label_start_byte == 0 {
+            if loop_back == false { 
+                total_offset += 1;
+            }
+            continue;
+        }
+        
+        // 3. non-pointer label (so label_start_byte indicates a length)
+        let cursor = cursor + 1;
+
+        let label = str::from_utf8(full_dns_msg.get(cursor .. cursor + label_start_byte as usize).ok_or(DnsDecodingError::InvalidLength)?).map_err(|_|DnsDecodingError::InvalidLabelEncoding)?;
+        let label = label.to_string();
+        parts.push(label);
+
+        if loop_back == false {
+            // +1 for the length byte
+            total_offset += 1+label_start_byte as usize;
+        }
+        
+        // push next byte into stack to look into
+        stack.push(cursor + label_start_byte as usize);
+        continue;
+        
     }
 
-    Ok((parts.join("."), cursor))
+    Ok((parts.join("."), total_offset))
 
 }
 
-
-fn parse_domain_name(packet: &[u8], cursor: usize) -> Result<(String,usize), DnsDecodingError> {
-    // parse label
-    let mut cursor: usize = cursor;
-    let mut labels: Vec<String> = Vec::new();
-    let mut length = *packet.get(cursor).ok_or(DnsDecodingError::InvalidLength)? as usize;
-    cursor += 1;
-    while length != 0 {
-
-        // per 4.1.4 RFC1035 there is this dumb offset based domain name compression feature
-        // so we need to check if label is compressed ( references label earlier )
-        // of course, this feature sort of necessitates a clumsy implementation since
-        // we need to ensure there's no cyclical offest references.
-        // if parse_labels encounters another pointer--that should raise an exception (since that indicates a loop)
-        if (length & 0b1100_0000) != 0 {
-            // parse all labels starting at buffer[length]
-            let pointer = length & 0b0011_1111;
-            let (referenced_labels, _) = parse_labels( packet.get(pointer..packet.len()).ok_or(DnsDecodingError::InvalidLength)?)?;
-            labels.push(referenced_labels);
-            cursor += 1;
-            length = *packet.get(cursor).ok_or(DnsDecodingError::InvalidLength)? as usize;
-            continue
-        }
-
-        // read label
-        let label = str::from_utf8(packet.get(cursor..cursor+length).ok_or(DnsDecodingError::InvalidLength)?).map_err(|_|DnsDecodingError::InvalidLabelEncoding)?;
-        labels.push(label.to_string());
-
-        cursor += length;
-        length = *packet.get(cursor).ok_or(DnsDecodingError::InvalidLength)? as usize;
-        cursor += 1;
-
-    }
-
-    Ok((labels.join("."), cursor))
-
-}
 
 
 fn parse_resource_record(packet: &[u8], cursor: usize) -> Result<(ResourceRecord, usize), DnsDecodingError> {
     // name
-    let (domain, mut cursor) = parse_domain_name(packet, cursor)?;
+    //let (domain, mut cursor) = parse_domain_name(packet, cursor)?;
+    let (domain, mut cursor) = parse_labels(packet, &cursor)?;
 
     // type
     let rr_type  = u16::from_be_bytes(packet.get(cursor..cursor+2).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
@@ -364,7 +379,8 @@ pub fn parse_packet(packet: &[u8]) -> Result<DnsMessage, DnsDecodingError>  {
 
     for _ in 0..message.header.question_count {
         // Q-Name
-        let (domain, mut cursor) = parse_domain_name(packet, main_cursor)?;
+        let (domain, mut cursor) = parse_labels(packet, &main_cursor)?;
+        //parse_domain_name(packet, main_cursor)?;
         // Q-Type
         let qtype = u16::from_be_bytes(packet.get(cursor..cursor+2).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
         cursor += 2;
@@ -424,8 +440,6 @@ pub fn parse_packet(packet: &[u8]) -> Result<DnsMessage, DnsDecodingError>  {
     if additional_records.len() > 0 {
         message.additional = Some(additional_records);
     }
-
-
 
     // 4. return parsed message back
     Ok(message)

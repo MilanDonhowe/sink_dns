@@ -8,6 +8,6 @@ OS stub resolver -> DNS blocker -> DNS server
 
 TODO LIST:
 - [ ] better compressed message parsing
-- [ ] cli
+- [ x ] cli
 - [ ] better tracing / logging
 

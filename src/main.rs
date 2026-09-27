@@ -76,7 +76,11 @@ async fn main() {
                             println!("[*] sending payload to upstream dns");
                             let send_response = df_dns_response_tx.clone();
                             let upstream_dns_addr = upstream_dns_addr.clone();
+                            let task_cancel = dns_close_token.clone();
                             tracker.spawn(async move {
+                                /* 
+                                    TODO: I need some time out mechanism here so we don't exhaust the OS's total fd count on these udp sockets.
+                                */
                                 // create socket
                                 let mut buf = vec![0;600]; // a few more bytes than needed
                                 
@@ -103,29 +107,42 @@ async fn main() {
                                 }
 
                                 // ignore errors
-                                let dns_send = upstream_dns.send(&pkt).await;
-
-                                match dns_send {
-                                    Ok(_) => {},
-                                    Err(e) => {
-                                        eprintln!("[x] FAILED to send msg to upstream DNS: {:?}", e);
+                                /*
+                                    I do not think this select! is necessary as dns is fire+forget.
+                                */
+                                tokio::select! {
+                                    dns_send = upstream_dns.send(&pkt) => {
+                                        match dns_send {
+                                            Ok(_) => {},
+                                            Err(e) => {
+                                                eprintln!("[x] FAILED to send msg to upstream DNS: {:?}", e);
+                                                return;
+                                            }
+                                        }
+                                    },
+                                    _ = task_cancel.cancelled() => {
                                         return;
                                     }
                                 }
+                                //let dns_send = upstream_dns.send(&pkt).await;
 
-
-                                let dns_reply = upstream_dns.recv(&mut buf).await;
-
-                                match dns_reply {
-                                    Ok(msg_len) => {
-                                        // ignore error for now
-                                        println!("[*] sending dns reply back to stub resolver");
-                                        let _ = send_response.send(( buf[0..msg_len].to_vec(), from_addr )).await;
-                                    }
-                                    Err(_) => {
-                                        eprintln!("[x] FAILED to recieve msg from upstream DNS");
-                                    }
+                                tokio::select! {
+                                    dns_reply = upstream_dns.recv(&mut buf) => {
+                                        match dns_reply {
+                                            Ok(msg_len) => {
+                                                // ignore error for now
+                                                println!("[*] sending dns reply back to stub resolver");
+                                                let _ = send_response.send(( buf[0..msg_len].to_vec(), from_addr )).await;
+                                            }
+                                            Err(_) => {
+                                                eprintln!("[x] FAILED to recieve msg from upstream DNS");
+                                            }
+                                        }
+                                    },
+                                    // ensure we gracefully exit
+                                    _ = task_cancel.cancelled() => {}
                                 }
+                                
                             });
                         },
                         None => {}
