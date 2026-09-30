@@ -1,10 +1,10 @@
 /*
-    lib.rs nxdns
+    lib.rs sink_dns
 
 */
 mod dns;
 
-use std::{collections::HashMap, error::Error};
+use std::collections::HashMap;
 use tokio::sync::mpsc::{Sender};
 use std::net::SocketAddr;
 
@@ -25,7 +25,7 @@ pub async fn process_dns_packet(packet: &[u8], send_addr: SocketAddr, block_list
     // 1. Parse DNS packet (at least to the extent where we can determine if the query is in our block list)
     let mut dns_msg = dns::parse_packet(packet)?;
 
-    println!("Parsed DNS MSG: {:?}", dns_msg);
+    // println!("Parsed DNS MSG: {:?}", dns_msg);
 
     // okay so technically it is possible to have multiple DNS names in a single query.
     // so we have to do a little magic here for forwarding results back to the resolver.
@@ -58,10 +58,10 @@ pub async fn process_dns_packet(packet: &[u8], send_addr: SocketAddr, block_list
     dns_msg.answers = Some(records);
 
     if dont_block {
-        println!("[*] sending msg to upstream dns");
+        //println!("[*] sending msg to upstream dns");
         let _ = forward_dns.send( (packet.to_vec(), send_addr) ).await;
     } else {
-        println!("[*] sending block msg direct to stub dns");
+        // println!("[*] sending block msg direct to stub dns");
         // this is a response
         dns_msg.header.query_or_response = true;
 

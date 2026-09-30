@@ -10,10 +10,12 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use clap::Parser;
 
+mod abp;
+
 /// small dns sinkhole
 #[derive(Parser,Debug)]
 struct Args {
-    /// Upstream dns server to forward unsunk DNS requests
+    /// Upstream dns server to forward unsunk DNS requests (default to google dns)
     #[arg(short, long, default_value_t = "8.8.8.8:53".to_string())]
     upstream_dns: String,
 
@@ -32,13 +34,14 @@ async fn main() {
 
     // 1. synchronous bootstrap
     println!("[*] synchronously loading blocklist from {}", blocklist_path.display());
-    let mut block_list: HashMap<String, BlockEntry> = HashMap::new();
-    fs::read_to_string(blocklist_path)
-        .expect("[x] could not read blocklist file")
-        .lines()
-        .for_each(|domain| {
-            block_list.insert(domain.to_string(), BlockEntry::Block);
-        });
+    let block_list: HashMap<String, BlockEntry> = match abp::parse_adp_file(blocklist_path) {
+        Ok(blocklist) => blocklist,
+        Err(err) => {
+            panic!("ran into error parsing blocklist: {:?}", err);
+        }
+    };
+
+    println!("[*] loaded blocklist, blocking {} domains", block_list.len());
 
     let tracker = TaskTracker::new();
 
@@ -63,10 +66,8 @@ async fn main() {
     let df_dns_response_tx: Sender<(Vec<u8>, SocketAddr)> = dns_response_tx.clone();
 
     let dns_forwarder_task = tokio::spawn(async move {
-        // TODO: make the upstream dns configurable
         let upstream_dns_addr = upstream_dns;
 
-        let mut buf = vec![0; 1024];
         loop {
             
             tokio::select! {
@@ -172,7 +173,6 @@ async fn main() {
                     match result {
                         Ok((len, addr)) => {
                             // handle DNS query packet
-                            println!("got request!");
                             let _ = process_dns_packet(&buf[0..len], addr, &block_list, &forward_to_dns_server, &send_to_client).await;
                         },
                         Err(_) => {
