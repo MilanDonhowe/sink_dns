@@ -13,6 +13,7 @@ pub struct Header {
     truncation: bool,
     recursion_desired: bool,
     recursion_available: bool,
+    #[allow(dead_code)]
     z: bool,
     response_code: u8,
     question_count: u16,
@@ -45,7 +46,8 @@ pub enum DnsDecodingError {
     InvalidLabelEncoding,
     CompressedLabelLoop,
     UnimplementedType,
-    NoQuestions
+    NoQuestions,
+    MalformedDomainName
 }
 
 #[derive(Debug)]
@@ -330,36 +332,36 @@ pub fn parse_packet(packet: &[u8]) -> Result<DnsMessage, DnsDecodingError>  {
 
     let qr: bool = (flags & 0b1000_0000_0000_0000 >> 15) != 0; // query (0) or response (1)
     let opcode: u8 = (flags & 0b0111_1000_0000_0000 >> 11) as u8; // querty type (0=normal, 1=inverse, 2=status)
-    let AA: bool = (flags & 0b0000_0100_0000_0000 >> 10) != 0; // Authoritative Answer
-    let TC: bool = (flags & 0b0000_0010_0000_0000 >> 9) != 0; // truncation (was msg truncated?)
-    let RD: bool =  (flags & 0b0000_0001_0000_0000 >> 8) != 0; // Recursion desired 
-    let RA: bool = (flags & 0b0000_0000_1000_0000 >> 7 ) != 0; // RA set or cleared if server provides recursion
-    let Z: bool = (flags & 0b0000_0000_0111_0000 >> 4) != 0; // must be zero
-    let RCODE: u8 = (flags & 0b0000_0000_0000_1111) as u8; // error code if any (0 for success)
+    let aa: bool = (flags & 0b0000_0100_0000_0000 >> 10) != 0; // Authoritative Answer
+    let tc: bool = (flags & 0b0000_0010_0000_0000 >> 9) != 0; // truncation (was msg truncated?)
+    let rd: bool =  (flags & 0b0000_0001_0000_0000 >> 8) != 0; // Recursion desired 
+    let ra: bool = (flags & 0b0000_0000_1000_0000 >> 7 ) != 0; // RA set or cleared if server provides recursion
+    let z: bool = (flags & 0b0000_0000_0111_0000 >> 4) != 0; // must be zero
+    let rcode: u8 = (flags & 0b0000_0000_0000_1111) as u8; // error code if any (0 for success)
 
     // # questions in question section
-    let QDCOUNT = u16::from_be_bytes(packet.get(4..6).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
+    let qdcount = u16::from_be_bytes(packet.get(4..6).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
     // # resource records in answer section
-    let ANCOUNT = u16::from_be_bytes(packet.get(6..8).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
+    let ancount = u16::from_be_bytes(packet.get(6..8).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
     // # name server resource records in authority records section
-    let NSCOUNT = u16::from_be_bytes(packet.get(8..10).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
+    let nscount = u16::from_be_bytes(packet.get(8..10).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
     // # resource records in additional records section
-    let ARCOUNT = u16::from_be_bytes(packet.get(10..12).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
+    let arcount = u16::from_be_bytes(packet.get(10..12).ok_or(DnsDecodingError::InvalidLength)?.try_into().map_err(|_|DnsDecodingError::InvalidLength)?);
 
     let header = Header {
         id,
         query_or_response: qr,
         opcode,
-        authoritative_answer: AA,
-        truncation: TC,
-        recursion_desired: RD,
-        recursion_available: RA,
-        z: Z,
-        response_code: RCODE,
-        question_count: QDCOUNT,
-        answer_count: ANCOUNT,
-        name_server_count: NSCOUNT,
-        additional_record_count: ARCOUNT
+        authoritative_answer: aa,
+        truncation: tc,
+        recursion_desired: rd,
+        recursion_available: ra,
+        z,
+        response_code: rcode,
+        question_count: qdcount,
+        answer_count: ancount,
+        name_server_count: nscount,
+        additional_record_count: arcount
     };
 
     /* 

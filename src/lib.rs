@@ -39,19 +39,37 @@ pub async fn process_dns_packet(packet: &[u8], send_addr: SocketAddr, block_list
 
 
     for question in questions.iter() {
-        match block_list.get(&question.name) {
-            Some(_) => {
-                // build a dns reply
-                dns_msg.header.answer_count += 1;
-                let blank_record = dns::build_nullreply(&question)?;
-                records.push(blank_record);
-            }
-            None => {
-                // Alright, let's forward this packet
-                dont_block = true;
-                break;
+        /*
+            Ensure we block sub-domains.
+            Right now we only check if the domain name in our hash map
+            so if we block "google.com" if we get a request from "map.google.com"
+            we need to ALSO block that domain.
+        */
+        let hierarchy: Vec<String> = question.name.clone().split(".").map(str::to_owned).collect();
+        let mut block = false;
+        
+        //let sub_domains =  hierarchy.get(..hierarchy.len()-2).ok_or(DnsDecodingError::MalformedDomainName)?;
+        for idx in 0..hierarchy.len()-2 {
+            let subdomain = hierarchy[idx..].join(".");
+            match block_list.get(&subdomain) {
+                Some(_) => {
+                    block = true;
+                },
+                None => {}
             }
         }
+
+        // forward packet if domain is allowed
+        if block == false {
+            dont_block = true;
+            break;
+        }
+
+        // otherwise, build a dns reply
+        dns_msg.header.answer_count += 1;
+        let blank_record = dns::build_nullreply(&question)?;
+        records.push(blank_record);
+
     }
     // re-move questions back into dns_msg struct
     dns_msg.questions = Some(questions);

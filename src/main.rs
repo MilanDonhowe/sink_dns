@@ -1,6 +1,5 @@
 use sink_dns::{BlockEntry, process_dns_packet};
 use std::collections::HashMap;
-use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::net::{UdpSocket};
@@ -19,6 +18,11 @@ struct Args {
     #[arg(short, long, default_value_t = "8.8.8.8:53".to_string())]
     upstream_dns: String,
 
+    /// UDP port to listen for requests on
+    #[arg(short, long, value_name="port", default_value_t = 53)]
+    port: u16,
+
+    /// List of domains to block in AdblockPlus file format
     #[arg(short, long, value_name = "FILE", default_value_os_t=PathBuf::from(r"blocklist.txt"))]
     blocklist: PathBuf
 }
@@ -31,6 +35,7 @@ async fn main() {
 
     let blocklist_path = args.blocklist;
     let upstream_dns = args.upstream_dns;
+    let port = args.port;
 
     // 1. synchronous bootstrap
     println!("[*] synchronously loading blocklist from {}", blocklist_path.display());
@@ -45,7 +50,8 @@ async fn main() {
 
     let tracker = TaskTracker::new();
 
-    let server = UdpSocket::bind("127.0.0.1:7753")
+    let bind_address = "127.0.0.1:".to_string() + &port.to_string();
+    let server = UdpSocket::bind(bind_address.as_str())
         .await
         .expect("port occupied");
 
