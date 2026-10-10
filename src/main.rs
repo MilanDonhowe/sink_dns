@@ -2,12 +2,15 @@ use sink_dns::{BlockEntry, process_dns_packet};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::net::{UdpSocket};
+use tokio::time::timeout;
 use tokio::signal;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use clap::Parser;
+
 
 mod abp;
 
@@ -25,6 +28,7 @@ struct Args {
     /// List of domains to block in AdblockPlus file format
     #[arg(short, long, value_name = "FILE", default_value_os_t=PathBuf::from(r"blocklist.txt"))]
     blocklist: PathBuf
+
 }
 
 
@@ -131,18 +135,25 @@ async fn main() {
                                         return;
                                     }
                                 }
-                                //let dns_send = upstream_dns.send(&pkt).await;
 
                                 tokio::select! {
-                                    dns_reply = upstream_dns.recv(&mut buf) => {
+                                    // should this timeout be configurable?  I feel like if the user has control over it
+                                    dns_reply = timeout(Duration::from_secs(3), upstream_dns.recv(&mut buf)) => {
                                         match dns_reply {
-                                            Ok(msg_len) => {
+                                            // no timeout, we get response yay
+                                            Ok(Ok(msg_len)) => {
                                                 // ignore error for now
                                                 println!("[*] sending dns reply back to stub resolver");
                                                 let _ = send_response.send(( buf[0..msg_len].to_vec(), from_addr )).await;
                                             }
+
+                                            // I/O socket error
+                                            Ok(Err(e)) => {
+                                                eprintln!("[x] FAILED to recieve msg from upstream DNS: {}", e);
+                                            }
+
                                             Err(_) => {
-                                                eprintln!("[x] FAILED to recieve msg from upstream DNS");
+                                                eprintln!("[x] Timeout waiting to receive upstream DNS response");
                                             }
                                         }
                                     },
