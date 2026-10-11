@@ -13,6 +13,7 @@ use clap::Parser;
 
 
 mod abp;
+mod forward;
 
 /// small dns sinkhole
 #[derive(Parser,Debug)]
@@ -52,7 +53,6 @@ async fn main() {
 
     println!("[*] loaded blocklist, blocking {} domains", block_list.len());
 
-    let tracker = TaskTracker::new();
 
     let bind_address = "127.0.0.1:".to_string() + &port.to_string();
     let server = UdpSocket::bind(bind_address.as_str())
@@ -76,104 +76,12 @@ async fn main() {
     let df_dns_response_tx: Sender<(Vec<u8>, SocketAddr)> = dns_response_tx.clone();
 
     let dns_forwarder_task = tokio::spawn(async move {
-        let upstream_dns_addr = upstream_dns;
-
-        loop {
-            
-            tokio::select! {
-                msg = dns_traffic_rx.recv() => {
-                    match msg {
-                        Some((pkt, from_addr)) => {
-                            println!("[*] sending payload to upstream dns");
-                            let send_response = df_dns_response_tx.clone();
-                            let upstream_dns_addr = upstream_dns_addr.clone();
-                            let task_cancel = dns_close_token.clone();
-                            tracker.spawn(async move {
-                                /* 
-                                    TODO: I need some time out mechanism here so we don't exhaust the OS's total fd count on these udp sockets.
-                                */
-                                // create socket
-                                let mut buf = vec![0;600]; // a few more bytes than needed
-                                
-                                // create arndom address
-                                let upstream_dns = UdpSocket::bind("0.0.0.0:0").await;
-
-                                let upstream_dns = match upstream_dns {
-                                    Ok(dns) => dns,
-                                    Err(e) => {
-                                        eprintln!("[x] FAILED to create socket for upstream DNS connection: {}", e);
-                                        return;
-                                    }
-                                };
-
-                                // udp is connection less but this call restricts our socket to the referenced address
-                                // this has some performance benefits as opposed to multiple send_to + recv_from calls
-                                let connect_result = upstream_dns.connect(upstream_dns_addr).await;
-                                match connect_result {
-                                    Ok(_) => {},
-                                    Err(e) => {
-                                        eprintln!("[x] FAILED to connect to upstream DNS: {:?}", e);
-                                        return;
-                                    }
-                                }
-
-                                // ignore errors
-                                /*
-                                    I do not think this select! is necessary as dns is fire+forget.
-                                */
-                                tokio::select! {
-                                    dns_send = upstream_dns.send(&pkt) => {
-                                        match dns_send {
-                                            Ok(_) => {},
-                                            Err(e) => {
-                                                eprintln!("[x] FAILED to send msg to upstream DNS: {:?}", e);
-                                                return;
-                                            }
-                                        }
-                                    },
-                                    _ = task_cancel.cancelled() => {
-                                        return;
-                                    }
-                                }
-
-                                tokio::select! {
-                                    // should this timeout be configurable?  I feel like if the user has control over it
-                                    dns_reply = timeout(Duration::from_secs(3), upstream_dns.recv(&mut buf)) => {
-                                        match dns_reply {
-                                            // no timeout, we get response yay
-                                            Ok(Ok(msg_len)) => {
-                                                // ignore error for now
-                                                println!("[*] sending dns reply back to stub resolver");
-                                                let _ = send_response.send(( buf[0..msg_len].to_vec(), from_addr )).await;
-                                            }
-
-                                            // I/O socket error
-                                            Ok(Err(e)) => {
-                                                eprintln!("[x] FAILED to recieve msg from upstream DNS: {}", e);
-                                            }
-
-                                            Err(_) => {
-                                                eprintln!("[x] Timeout waiting to receive upstream DNS response");
-                                            }
-                                        }
-                                    },
-                                    // ensure we gracefully exit
-                                    _ = task_cancel.cancelled() => {}
-                                }
-                                
-                            });
-                        },
-                        None => {}
-                    }
-                },
-                _ = dns_close_token.cancelled() => {
-                    tracker.close();
-                    println!("[*] waiting for tracker to close");
-                    let _ = tracker.wait().await;
-                    break;
-                }
-            }
-        }
+        let _ = forward::dns_forwarder(
+            upstream_dns,
+            dns_traffic_rx,
+            df_dns_response_tx,
+            dns_close_token
+        ).await;
     });
 
     let forward_to_dns_server = dns_traffic_tx.clone();
