@@ -16,8 +16,10 @@ async fn dns_forward_worker(
     worker_close: CancellationToken,
     dns_response: Sender<(Vec<u8>, SocketAddr)>,
     dns_request: Arc<Mutex<Receiver<sink_dns::MSG>>>,
-    upstream_dns_addr: String
+    upstream_dns_addr: String,
+    worker_id: u32
 ){
+    println!("{worker_id} spawned");
     loop {
         tokio::select! {
             mut dns_tx_queue = dns_request.lock() => {
@@ -25,6 +27,7 @@ async fn dns_forward_worker(
                     msg = dns_tx_queue.recv() => {
                         match msg {
                             Some((pkt, from_addr)) => {
+                                println!("{worker_id} handling request");
                                 let mut buf = vec![0;600]; // a few more bytes than needed
                                 
                                 // create random address
@@ -69,15 +72,19 @@ async fn dns_forward_worker(
                                 }
 
                                 tokio::select! {
-                                    dns_reply = upstream_dns.recv(&mut buf) => {
+                                    dns_reply = timeout(Duration::from_secs(3), upstream_dns.recv(&mut buf)) => {
                                         match dns_reply {
-                                            Ok(msg_len) => {
+                                            Ok(Ok(msg_len)) => {
                                                 // ignore error for now
                                                 println!("[*] sending dns reply back to stub resolver");
                                                 let _ = dns_response.send(( buf[0..msg_len].to_vec(), from_addr)).await;
                                             }
+                                            // socket I/O error
+                                            Ok(Err(e)) => {
+                                                eprintln!("[x] I/O error trying to recieve msg from upstream DNS: {e}");
+                                            }
                                             Err(_) => {
-                                                eprintln!("[x] FAILED to recieve msg from upstream DNS");
+                                                eprintln!("[x] Timeout waiting to recieve response from upstream DNS");
                                             }
                                         }
                                     },
@@ -121,7 +128,7 @@ pub async fn dns_forwarder(
         let dns_rx = Arc::clone(&dns_msg_recv);
         let dns_addr: String = upstream_dns_addr.clone();
         tracker.spawn(async move {
-            dns_forward_worker(close_token, dns_tx, dns_rx, dns_addr).await;
+            dns_forward_worker(close_token, dns_tx, dns_rx, dns_addr, _thread).await;
         });
     }
 

@@ -2,13 +2,10 @@ use sink_dns::{BlockEntry, process_dns_packet};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
 use tokio::net::{UdpSocket};
-use tokio::time::timeout;
 use tokio::signal;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 use clap::Parser;
 
 
