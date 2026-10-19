@@ -5,5 +5,8 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-tokio = {version = "1.53.1", features=["full"]}
+tokio = {version = "1.53.1", features=["full", "tracing"]}
 tokio-util = {version = "0.7.19", features=["rt"]}
+tracing = "0.1"
+tracing-subscriber = "0.3"
+console-subscriber = "0.1.5"

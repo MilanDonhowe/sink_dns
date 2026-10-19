@@ -32,6 +32,13 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
+
+    // stand-up tracing subscriber
+    let subscriber = tracing_subscriber::FmtSubscriber::new();
+    if let Err(fail) = tracing::subscriber::set_global_default(subscriber){
+        panic!("failed to setup tokio trace subscriber!  Err = {}", fail);
+    };
+
     // cli
     let args = Args::parse();
 
@@ -40,7 +47,8 @@ async fn main() {
     let port = args.port;
 
     // 1. synchronous bootstrap
-    println!("[*] synchronously loading blocklist from {}", blocklist_path.display());
+    //println!("[*] synchronously loading blocklist from {}", blocklist_path.display());
+    tracing::info!("loading blocklist from {}", blocklist_path.display());
     let block_list: HashMap<String, BlockEntry> = match abp::parse_adp_file(blocklist_path) {
         Ok(blocklist) => blocklist,
         Err(err) => {
@@ -48,7 +56,7 @@ async fn main() {
         }
     };
 
-    println!("[*] loaded blocklist, blocking {} domains", block_list.len());
+    tracing::info!("loaded blocklist, blocking {} domains", block_list.len());
 
 
     let bind_address = "127.0.0.1:".to_string() + &port.to_string();
@@ -64,7 +72,7 @@ async fn main() {
     let close_token = CancellationToken::new();
 
     // for real DNS traffic we forward it
-    let (dns_traffic_tx, mut dns_traffic_rx): (Sender<sink_dns::MSG>, Receiver<sink_dns::MSG>) =
+    let (dns_traffic_tx, dns_traffic_rx): (Sender<sink_dns::MSG>, Receiver<sink_dns::MSG>) =
         mpsc::channel(64);
     let (dns_response_tx, mut dns_response_rx): (Sender<sink_dns::MSG>, Receiver<sink_dns::MSG>) =
         mpsc::channel(64);
@@ -122,7 +130,7 @@ async fn main() {
         }
     });
 
-    println!("[*] Spun up server");
+    tracing::info!("spun up DNS server on port {}", args.port);
 
     // graceful shutdown
     tokio::select! {
@@ -130,17 +138,16 @@ async fn main() {
         _ = rx_shutdown.recv() => {}
     }
 
-    println!("[*] Gracefully shutting down");
+    tracing::info!("gracefully shutting down");
 
     close_token.cancel();
 
     // wait for tasks to shutdown
-    println!("[*] waiting for server_task");
+    tracing::info!("waiting for server_task");
     let _ = server_task.await;
 
-    println!("[*] waiting for dns_forwarder_task");
+    tracing::info!("waiting for dns_forwarder_task");
     let _ = dns_forwarder_task.await;
-
 
 
 }
