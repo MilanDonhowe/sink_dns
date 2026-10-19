@@ -6,10 +6,11 @@ use tokio::net::{UdpSocket};
 use tokio::signal;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 use clap::Parser;
 
+
 mod abp;
+mod forward;
 
 /// small dns sinkhole
 #[derive(Parser,Debug)]
@@ -25,11 +26,19 @@ struct Args {
     /// List of domains to block in AdblockPlus file format
     #[arg(short, long, value_name = "FILE", default_value_os_t=PathBuf::from(r"blocklist.txt"))]
     blocklist: PathBuf
+
 }
 
 
 #[tokio::main]
 async fn main() {
+
+    // stand-up tracing subscriber
+    let subscriber = tracing_subscriber::FmtSubscriber::new();
+    if let Err(fail) = tracing::subscriber::set_global_default(subscriber){
+        panic!("failed to setup tokio trace subscriber!  Err = {}", fail);
+    };
+
     // cli
     let args = Args::parse();
 
@@ -38,7 +47,8 @@ async fn main() {
     let port = args.port;
 
     // 1. synchronous bootstrap
-    println!("[*] synchronously loading blocklist from {}", blocklist_path.display());
+    //println!("[*] synchronously loading blocklist from {}", blocklist_path.display());
+    tracing::info!("loading blocklist from {}", blocklist_path.display());
     let block_list: HashMap<String, BlockEntry> = match abp::parse_adp_file(blocklist_path) {
         Ok(blocklist) => blocklist,
         Err(err) => {
@@ -46,9 +56,8 @@ async fn main() {
         }
     };
 
-    println!("[*] loaded blocklist, blocking {} domains", block_list.len());
+    tracing::info!("loaded blocklist, blocking {} domains", block_list.len());
 
-    let tracker = TaskTracker::new();
 
     let bind_address = "127.0.0.1:".to_string() + &port.to_string();
     let server = UdpSocket::bind(bind_address.as_str())
@@ -63,7 +72,7 @@ async fn main() {
     let close_token = CancellationToken::new();
 
     // for real DNS traffic we forward it
-    let (dns_traffic_tx, mut dns_traffic_rx): (Sender<sink_dns::MSG>, Receiver<sink_dns::MSG>) =
+    let (dns_traffic_tx, dns_traffic_rx): (Sender<sink_dns::MSG>, Receiver<sink_dns::MSG>) =
         mpsc::channel(64);
     let (dns_response_tx, mut dns_response_rx): (Sender<sink_dns::MSG>, Receiver<sink_dns::MSG>) =
         mpsc::channel(64);
@@ -72,97 +81,12 @@ async fn main() {
     let df_dns_response_tx: Sender<(Vec<u8>, SocketAddr)> = dns_response_tx.clone();
 
     let dns_forwarder_task = tokio::spawn(async move {
-        let upstream_dns_addr = upstream_dns;
-
-        loop {
-            
-            tokio::select! {
-                msg = dns_traffic_rx.recv() => {
-                    match msg {
-                        Some((pkt, from_addr)) => {
-                            println!("[*] sending payload to upstream dns");
-                            let send_response = df_dns_response_tx.clone();
-                            let upstream_dns_addr = upstream_dns_addr.clone();
-                            let task_cancel = dns_close_token.clone();
-                            tracker.spawn(async move {
-                                /* 
-                                    TODO: I need some time out mechanism here so we don't exhaust the OS's total fd count on these udp sockets.
-                                */
-                                // create socket
-                                let mut buf = vec![0;600]; // a few more bytes than needed
-                                
-                                // create arndom address
-                                let upstream_dns = UdpSocket::bind("0.0.0.0:0").await;
-
-                                let upstream_dns = match upstream_dns {
-                                    Ok(dns) => dns,
-                                    Err(e) => {
-                                        eprintln!("[x] FAILED to create socket for upstream DNS connection: {}", e);
-                                        return;
-                                    }
-                                };
-
-                                // udp is connection less but this call restricts our socket to the referenced address
-                                // this has some performance benefits as opposed to multiple send_to + recv_from calls
-                                let connect_result = upstream_dns.connect(upstream_dns_addr).await;
-                                match connect_result {
-                                    Ok(_) => {},
-                                    Err(e) => {
-                                        eprintln!("[x] FAILED to connect to upstream DNS: {:?}", e);
-                                        return;
-                                    }
-                                }
-
-                                // ignore errors
-                                /*
-                                    I do not think this select! is necessary as dns is fire+forget.
-                                */
-                                tokio::select! {
-                                    dns_send = upstream_dns.send(&pkt) => {
-                                        match dns_send {
-                                            Ok(_) => {},
-                                            Err(e) => {
-                                                eprintln!("[x] FAILED to send msg to upstream DNS: {:?}", e);
-                                                return;
-                                            }
-                                        }
-                                    },
-                                    _ = task_cancel.cancelled() => {
-                                        return;
-                                    }
-                                }
-                                //let dns_send = upstream_dns.send(&pkt).await;
-
-                                tokio::select! {
-                                    dns_reply = upstream_dns.recv(&mut buf) => {
-                                        match dns_reply {
-                                            Ok(msg_len) => {
-                                                // ignore error for now
-                                                println!("[*] sending dns reply back to stub resolver");
-                                                let _ = send_response.send(( buf[0..msg_len].to_vec(), from_addr )).await;
-                                            }
-                                            Err(_) => {
-                                                eprintln!("[x] FAILED to recieve msg from upstream DNS");
-                                            }
-                                        }
-                                    },
-                                    // ensure we gracefully exit
-                                    _ = task_cancel.cancelled() => {}
-                                }
-                                
-                            });
-                        },
-                        None => {}
-                    }
-                },
-                _ = dns_close_token.cancelled() => {
-                    tracker.close();
-                    println!("[*] waiting for tracker to close");
-                    let _ = tracker.wait().await;
-                    break;
-                }
-            }
-        }
+        let _ = forward::dns_forwarder(
+            upstream_dns,
+            dns_traffic_rx,
+            df_dns_response_tx,
+            dns_close_token
+        ).await;
     });
 
     let forward_to_dns_server = dns_traffic_tx.clone();
@@ -206,7 +130,7 @@ async fn main() {
         }
     });
 
-    println!("[*] Spun up server");
+    tracing::info!("spun up DNS server on port {}", args.port);
 
     // graceful shutdown
     tokio::select! {
@@ -214,17 +138,16 @@ async fn main() {
         _ = rx_shutdown.recv() => {}
     }
 
-    println!("[*] Gracefully shutting down");
+    tracing::info!("gracefully shutting down");
 
     close_token.cancel();
 
     // wait for tasks to shutdown
-    println!("[*] waiting for server_task");
+    tracing::info!("waiting for server_task");
     let _ = server_task.await;
 
-    println!("[*] waiting for dns_forwarder_task");
+    tracing::info!("waiting for dns_forwarder_task");
     let _ = dns_forwarder_task.await;
-
 
 
 }

@@ -25,6 +25,7 @@ GOALS:
 TODO LIST:
 - [x] better compressed message parsing
 - [x] cli
+- [ ] fix os error 24 on high load
 - [ ] rotating blocklist remote
 - [ ] better tracing / logging
 - [ ] TCP retry

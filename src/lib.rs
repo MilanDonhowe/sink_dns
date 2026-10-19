@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 
 use crate::dns::DnsDecodingError;
 
-
+#[derive(Debug)]
 pub enum BlockEntry {
     BlockPacket(Vec<u8>),
     Address(String),
@@ -20,6 +20,7 @@ pub enum BlockEntry {
 
 pub type MSG = (Vec<u8>, SocketAddr);
 
+#[tracing::instrument]
 pub async fn process_dns_packet(packet: &[u8], send_addr: SocketAddr, block_list: &HashMap<String, BlockEntry>, forward_dns: &Sender<MSG>, direct_reply: &Sender<MSG>) -> Result<(), dns::DnsDecodingError>{
     // This needs to be very fast
     // 1. Parse DNS packet (at least to the extent where we can determine if the query is in our block list)
@@ -48,8 +49,8 @@ pub async fn process_dns_packet(packet: &[u8], send_addr: SocketAddr, block_list
         let hierarchy: Vec<String> = question.name.clone().split(".").map(str::to_owned).collect();
         let mut block = false;
         
-        //let sub_domains =  hierarchy.get(..hierarchy.len()-2).ok_or(DnsDecodingError::MalformedDomainName)?;
-        for idx in 0..hierarchy.len()-2 {
+        // saturing sub prevents underflow (i.e., is user queries for non-hierarchal name like "HELLO")
+        for idx in 0..hierarchy.len().saturating_sub(2) {
             let subdomain = hierarchy[idx..].join(".");
             match block_list.get(&subdomain) {
                 Some(_) => {
